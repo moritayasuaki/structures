@@ -37,24 +37,58 @@ class SucBV sbv where
     rank :: Bit -> Int -> sbv -> Int
     select :: Bit -> Int -> sbv -> Int
 
+-- |
+-- >>> let t = Bit True
+-- >>> let f = Bit False
+-- >>> let p@(Poppy i a ub lb)  = _Poppy # U.fromList (take 1000 (cycle [t,f]))
+-- >>> rank t 21 p
+-- 11
+-- >>> rank t 20 p
+-- 10
+-- >>> select t 11 p
+-- 21
+
+-- |
+-- >>> let t = Bit True
+-- >>> let f = Bit False
+-- >>> let p@(Poppy i a ub lb)  = _Poppy # U.fromList (take 1000 (cycle [f,t,f]))
+-- >>> rank t 21 p
+-- 7
+-- >>> rank t 20 p
+-- 7
+-- >>> rank t 19 p
+-- 6
+-- >>> rank t 18 p
+-- 6
+-- >>> select t 7 p
+-- 20
+-- >>> rank f 21 p
+-- 14
+-- >>> rank f 20 p
+-- 13
+-- >>> select f 14 p
+-- 21
+
 data Poppy = Poppy {-# UNPACK #-} !Int !(Array Bit) 
                 !(U.Vector Word64) 
                 !(U.Vector Word64)
                 deriving (Eq,Ord,Show,Read)
 
-
 instance SucBV Poppy where
     isobv = _Poppy
-    rank (Bit True) n (Poppy len (V_Bit _ ws) ubs lbs) = c + c'
-      where (iw,ow) = n `divMod` 64
-            up = iw `div` ubsize
-            (lp,lo) = iw `divMod` lbsize
-            f 0 i = i .&. (2^32 -1)
+    rank (Bit True) n (Poppy len (V_Bit _ ws) ubs lbs) = c''' + c'' + c' + c
+      where (wi,wo) = n `divMod` 64
+            (ui,uo) = wi `divMod` ubsize
+            (li,lo) = wi `divMod` lbsize
+            (bi,bo) = wi `divMod` bbsize
+            f 0 i = i .&. (2^32 - 1)
             f n i = ((i `unsafeShiftR` ((n-1) * 10 + 32)) .&. (2^10-1)) + f (n-1) i
-            c = popCount ((ws U.! iw) .&. (2 ^ ow - 1))
-            c' = fromIntegral ((ubs U.! up) + f lo (lbs U.! lp))
+            c = popCount ((ws U.! wi) .&. (2 ^ wo - 1))
+            c' = U.foldl' (\p w-> p + popCount w) 0 (U.unsafeSlice (bi*bbsize) bo ws)
+            c'' = fromIntegral (f bi (lbs U.! li))
+            c''' = fromIntegral (ubs U.! ui)
     rank _ n p = n - rank (Bit True) n p
-    select b n poppy@(Poppy len _ _ _) = search (\i -> n < rank b i poppy) 0 (len-1)
+    select b n poppy@(Poppy len _ _ _) = search (\i -> (n-1) < rank b i poppy) 0 (len-1)
 
 _Poppy :: Iso' Poppy (Array Bit)
 _Poppy = iso (\(Poppy _ v _ _) -> v) $ f
@@ -67,9 +101,9 @@ _Poppy = iso (\(Poppy _ v _ _) -> v) $ f
 -- lower block size = 2^11 bits    32 bits par 2^11 bits
 -- upper block size = 2^32 bits    64 bits par 2^32 bits
 --                                 3.12500149% additional space
-bbsize = 2^9 `div` 64
-lbsize = 2^11 `div` 64
-ubsize = 2^32 `div` 64
+bbsize = 2^9 `div` 64  -- 8 words
+lbsize = 2^11 `div` 64 -- 4 base blocks
+ubsize = 2^32 `div` 64 -- 2000000 lower blocks
 
 buildPoppy :: U.Vector Word64 -> (U.Vector Word64,U.Vector Word64)
 buildPoppy vs = runST $ do 
