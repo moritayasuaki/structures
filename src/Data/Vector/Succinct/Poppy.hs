@@ -20,6 +20,7 @@ import Control.Lens as L
 import Data.Vector.Bit hiding (rank)
 import Data.Word
 import qualified Data.Vector.Generic as G
+import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Unboxed.Mutable as MU
 import qualified Data.Vector.Internal.Check as Ck
@@ -51,23 +52,15 @@ class SucBV sbv where
 -- |
 -- >>> let t = Bit True
 -- >>> let f = Bit False
--- >>> let p@(Poppy i a ub lb)  = _Poppy # U.fromList (take 1000 (cycle [f,t,f]))
--- >>> rank t 21 p
--- 7
--- >>> rank t 20 p
--- 7
--- >>> rank t 19 p
--- 6
--- >>> rank t 18 p
--- 6
--- >>> select t 7 p
--- 20
--- >>> rank f 21 p
--- 14
--- >>> rank f 20 p
--- 13
--- >>> select f 14 p
--- 21
+-- >>> let p@(Poppy i a ub lb)  = _Poppy # U.fromList (take 30000 (cycle [t,f,f,f,f]))
+-- >>> rank t 8888 p
+-- 1778
+-- >>> select t 1778 p
+-- 8886
+-- >>> let csp = _CSPoppy # U.fromList (take 30000 (cycle [t,f,f,f,f]))
+-- >>> rank t 8888 csp
+-- 1778
+-- >>> select t 1778 csp
 
 data Poppy = Poppy {-# UNPACK #-} !Int !(Array Bit) 
                 !(U.Vector Word64) 
@@ -85,14 +78,14 @@ instance SucBV Poppy where
             f n i = ((i `unsafeShiftR` ((n-1) * 10 + 32)) .&. (2^10-1)) + f (n-1) i
             c = popCount ((ws U.! wi) .&. (2 ^ wo - 1))
             c' = U.foldl' (\p w-> p + popCount w) 0 (U.unsafeSlice (bi*bbsize) bo ws)
-            c'' = fromIntegral (f bi (lbs U.! li))
+            c'' = fromIntegral (f (lo `div` bbsize) (lbs U.! li))
             c''' = fromIntegral (ubs U.! ui)
     rank _ n p = n - rank (Bit True) n p
     select b n poppy@(Poppy len _ _ _) = search (\i -> (n-1) < rank b i poppy) 0 (len-1)
 
 _Poppy :: Iso' Poppy (Array Bit)
-_Poppy = iso (\(Poppy _ v _ _) -> v) $ f
-  where f v@(V_Bit n ws) = let (l,l') = buildPoppy ws in Poppy n v l l'
+_Poppy = iso (\(Poppy _ v _ _) -> v) f
+  where f v@(V_Bit n ws) = let (ubs,lbs) = buildPoppy ws in Poppy n v ubs lbs
 
 -- Poppy
 --
@@ -141,12 +134,8 @@ buildPoppy vs = runST $ do
                 in (ui,uo,li,lo,bi,bo) :: (Int,Int,Int,Int,Int,Int)
         safeSlice i s vs = U.take s (U.drop i vs)
 
-
 divCeil :: Int -> Int -> Int
 divCeil n b = (n + b - 1) `div` b
-
- 
-
 
 -- |
 -- >>> search (\n->n^2 >= 16) 0 5
@@ -168,3 +157,43 @@ data CSPoppy = CSPoppy {-# UNPACK #-} !Int !(Array Bit)
                   !(U.Vector Word64)
                   !(U.Vector Word32)
                   !(U.Vector Word32)
+
+_CSPoppy :: Iso' CSPoppy (Array Bit)
+_CSPoppy = iso (\(CSPoppy _ v _ _ _ _) -> v) f
+  where f v = let p@(Poppy n v' ubs lbs) = _Poppy # v
+                  tstbl = buildCS (Bit True) p
+                  fstbl = buildCS (Bit False) p
+              in CSPoppy n v' ubs lbs tstbl fstbl
+
+buildCS :: Bit -> Poppy -> U.Vector Word32
+buildCS b p@(Poppy n v' ubs lbs) = U.fromList $ map (fromIntegral . flip (select b) p) [1, 1+samplingWidth .. smax]
+    where smax = rank b n p
+          samplingWidth = 8192
+
+instance SucBV CSPoppy where
+    isobv = _CSPoppy
+    rank (Bit True) n (CSPoppy len (V_Bit _ ws) ubs lbs _ _) = c''' + c'' + c' + c
+      where (wi,wo) = n `divMod` 64
+            (ui,uo) = wi `divMod` ubsize
+            (li,lo) = wi `divMod` lbsize
+            (bi,bo) = wi `divMod` bbsize
+            f 0 i = i .&. (2^32 - 1)
+            f n i = ((i `unsafeShiftR` ((n-1) * 10 + 32)) .&. (2^10-1)) + f (n-1) i
+            c = popCount ((ws U.! wi) .&. (2 ^ wo - 1))
+            c' = U.foldl' (\p w-> p + popCount w) 0 (U.unsafeSlice (bi*bbsize) bo ws)
+            c'' = fromIntegral (f (lo `div` bbsize) (lbs U.! li))
+            c''' = fromIntegral (ubs U.! ui)
+    rank _ n p = n - rank (Bit True) n p
+    select (Bit True) n (CSPoppy len (V_Bit _ ws) ubs lbs tstbl _) = ui * 2^32 + eli * 2^11 + bi * 2^9
+      where ui = search (\i -> n < fromIntegral (ubs U.! i)) 0 (U.length ubs - 1)
+            ur = ubs U.! ui
+            t = fromIntegral n - ur
+            tbli = ((n-1) `div` 8192)
+            sample = fromIntegral $ tstbl U.! tbli 
+            nli =  fromIntegral $ (sample `div` 64) `div` lbsize
+            eli = search (\i -> t < (lbs U.! i) `mod` 2^32) nli (min (U.length lbs - 1) ((ui+1)*(ubsize `div` lbsize)))
+            lr = lbs U.! eli
+            f 0 i = i .&. (2^32 - 1)
+            f n i = ((i `unsafeShiftR` ((n-1) * 10 + 32)) .&. (2^10-1)) + f (n-1) i
+            bi = search (\i -> t < f i lr) 0 3
+  
