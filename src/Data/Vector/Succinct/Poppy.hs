@@ -29,6 +29,7 @@ import Control.Monad
 import Control.Monad.ST (ST, runST)
 import Prelude hiding (null)
 import Data.List as Ls
+import Data.Maybe
 
 
 #define BOUNDS_CHECK(f) (Ck.f __FILE__ __LINE__ Ck.Bounds)
@@ -38,29 +39,20 @@ class SucBV sbv where
     rank :: Bit -> Int -> sbv -> Int
     select :: Bit -> Int -> sbv -> Int
 
--- |
--- >>> let t = Bit True
--- >>> let f = Bit False
--- >>> let p@(Poppy i a ub lb)  = _Poppy # U.fromList (take 1000 (cycle [t,f]))
--- >>> rank t 21 p
--- 11
--- >>> rank t 20 p
--- 10
--- >>> select t 11 p
--- 21
 
 -- |
 -- >>> let t = Bit True
 -- >>> let f = Bit False
 -- >>> let p@(Poppy i a ub lb)  = _Poppy # U.fromList (take 30000 (cycle [t,f,f,f,f]))
--- >>> rank t 8888 p
+-- >>> rank t 8886 p
 -- 1778
 -- >>> select t 1778 p
 -- 8886
--- >>> let csp = _CSPoppy # U.fromList (take 30000 (cycle [t,f,f,f,f]))
+-- >>> let csp = _CSPoppy # U.fromList (take 50000 (cycle [t,f,f,f,f]))
 -- >>> rank t 8888 csp
 -- 1778
 -- >>> select t 1778 csp
+-- 8886
 
 data Poppy = Poppy {-# UNPACK #-} !Int !(Array Bit) 
                 !(U.Vector Word64) 
@@ -81,7 +73,7 @@ instance SucBV Poppy where
             c'' = fromIntegral (f (lo `div` bbsize) (lbs U.! li))
             c''' = fromIntegral (ubs U.! ui)
     rank _ n p = n - rank (Bit True) n p
-    select b n poppy@(Poppy len _ _ _) = search (\i -> (n-1) < rank b i poppy) 0 (len-1)
+    select b n poppy@(Poppy len _ _ _) = bsearch (\i -> (n-1) < rank b i poppy) 0 (len-1)
 
 _Poppy :: Iso' Poppy (Array Bit)
 _Poppy = iso (\(Poppy _ v _ _) -> v) f
@@ -138,12 +130,12 @@ divCeil :: Int -> Int -> Int
 divCeil n b = (n + b - 1) `div` b
 
 -- |
--- >>> search (\n->n^2 >= 16) 0 5
+-- >>> bsearch (\n->n^2 >= 16) 0 5
 -- 4
-search :: Integral n => (n -> Bool) -> n -> n -> n
-search p l h | l == h = l
-             | p m = search p l m
-             | otherwise = search p (m+1) h
+bsearch :: Integral n => (n -> Bool) -> n -> n -> n
+bsearch p l h | l == h = l
+             | p m = bsearch p l m
+             | otherwise = bsearch p (m+1) h
              where m = l `div` 2 + h `div` 2
 
 -- CSPoppy supporting select0 and select1
@@ -170,6 +162,13 @@ buildCS b p@(Poppy n v' ubs lbs) = U.fromList $ map (fromIntegral . flip (select
     where smax = rank b n p
           samplingWidth = 8192
 
+mkbbvector :: Word64 -> U.Vector Word64
+mkbbvector w = U.fromList [l0,l1,l2,l3]
+    where l0 = 0
+          l1 = (w `unsafeShiftR` 32) .&. (2^10-1)
+          l2 = l1 + ((w `unsafeShiftR` 42) .&. (2^10-1))
+          l3 = l2 + ((w `unsafeShiftR` 52) .&. (2^10-1))
+
 instance SucBV CSPoppy where
     isobv = _CSPoppy
     rank (Bit True) n (CSPoppy len (V_Bit _ ws) ubs lbs _ _) = c''' + c'' + c' + c
@@ -184,16 +183,27 @@ instance SucBV CSPoppy where
             c'' = fromIntegral (f (lo `div` bbsize) (lbs U.! li))
             c''' = fromIntegral (ubs U.! ui)
     rank _ n p = n - rank (Bit True) n p
-    select (Bit True) n (CSPoppy len (V_Bit _ ws) ubs lbs tstbl _) = ui * 2^32 + eli * 2^11 + bi * 2^9
-      where ui = search (\i -> n < fromIntegral (ubs U.! i)) 0 (U.length ubs - 1)
+    select (Bit True) n (CSPoppy len (V_Bit _ ws) ubs lbs tstbl _) = eli * 2^11 + bi * 2^9 + wi * 2^6 + biti
+      where ui = maybe (U.length ubs - 1) pred (U.findIndex (\a -> (fromIntegral n) < a) ubs)
             ur = ubs U.! ui
             t = fromIntegral n - ur
             tbli = ((n-1) `div` 8192)
             sample = fromIntegral $ tstbl U.! tbli 
             nli =  fromIntegral $ (sample `div` 64) `div` lbsize
-            eli = search (\i -> t < (lbs U.! i) `mod` 2^32) nli (min (U.length lbs - 1) ((ui+1)*(ubsize `div` lbsize)))
+            lbs' = U.unsafeDrop nli lbs
+            eli = nli + maybe (U.length lbs' - 1) pred (U.findIndex (\a -> t < a .&. (2^32-1)) lbs')
             lr = lbs U.! eli
-            f 0 i = i .&. (2^32 - 1)
-            f n i = ((i `unsafeShiftR` ((n-1) * 10 + 32)) .&. (2^10-1)) + f (n-1) i
-            bi = search (\i -> t < f i lr) 0 3
-  
+            t' = t - (lr .&. (2^32-1))
+            bs = mkbbvector lr
+            bi = maybe (U.length bs - 1) pred (U.findIndex (\a -> t' < a) bs)
+            br = bs U.! bi
+            ws' = U.scanl (\l a -> l + fromIntegral (popCount a)) 0 $ U.drop (eli * 2^5 + bi * 2^3) ws
+            t'' = t' - br
+            wi = maybe (U.length ws' - 1) pred (U.findIndex (\a -> t'' < a) ws')
+            wr = ws' U.! wi
+            t''' = fromIntegral (t'' - wr)
+            biti = select64naive t''' (ws U.! (eli * 2^5 + bi * 2^3 + wi))
+
+select64naive :: Int -> Word64 -> Int
+select64naive r x = maybe 64 id $ findIndex (r <=) [popCount (x .&. (2^i-1)) | i <- [0..63]]
+
