@@ -12,7 +12,9 @@
 -- |
 -- http://www.cs.cmu.edu/~dga/papers/zhou-sea2013.pdf
 
-module Data.Vector.Succinct.Poppy where
+module Data.Vector.Succinct.Poppy (
+  Poppy, CSPoppy, _Poppy, _CSPoppy
+  ) where
 
 import Data.Bits
 import Data.Vector.Array
@@ -38,6 +40,7 @@ class SucBV sbv where
     isobv :: Iso' sbv (Array Bit)
     rank :: Bit -> Int -> sbv -> Int
     select :: Bit -> Int -> sbv -> Int
+    size :: sbv -> Int
 
 
 -- |
@@ -74,6 +77,8 @@ instance SucBV Poppy where
             c''' = fromIntegral (ubs U.! ui)
     rank _ n p = n - rank (Bit True) n p
     select b n poppy@(Poppy len _ _ _) = bsearch (\i -> (n-1) < rank b i poppy) 0 (len-1)
+    size (Poppy len _ _ _) = len
+
 
 _Poppy :: Iso' Poppy (Array Bit)
 _Poppy = iso (\(Poppy _ v _ _) -> v) f
@@ -149,6 +154,7 @@ data CSPoppy = CSPoppy {-# UNPACK #-} !Int !(Array Bit)
                   !(U.Vector Word64)
                   !(U.Vector Word32)
                   !(U.Vector Word32)
+                  deriving (Eq,Ord,Show,Read)
 
 _CSPoppy :: Iso' CSPoppy (Array Bit)
 _CSPoppy = iso (\(CSPoppy _ v _ _ _ _) -> v) f
@@ -171,6 +177,7 @@ mkbbvector w = U.fromList [l0,l1,l2,l3]
 
 instance SucBV CSPoppy where
     isobv = _CSPoppy
+    size (CSPoppy len _ _ _ _ _) = len
     rank (Bit True) n (CSPoppy len (V_Bit _ ws) ubs lbs _ _) = c''' + c'' + c' + c
       where (wi,wo) = n `divMod` 64
             (ui,uo) = wi `divMod` ubsize
