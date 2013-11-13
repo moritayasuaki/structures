@@ -9,11 +9,11 @@
 
 module Data.Vector.Succinct.WaveletMatrix where
 
-import Data.Vector.Succinct.Poppy
+import Data.Vector.Succinct.Poppy as P
 import Data.Vector.Array
 import Data.Vector.Bit 
 import qualified Data.Vector.Generic as G
-import Data.Bits
+import Data.Bits 
 import Control.Lens
 import Data.Vector as B
 import Data.Vector.Unboxed as U
@@ -21,15 +21,52 @@ import Data.Vector.Unboxed as U
 newtype WaveletMatrix = WaveletMatrix (B.Vector CSPoppy) deriving Show
 
 -- |
--- >>> buildWM (U.fromList [1,25,123,51,51])
+-- >>> wmSelect 0 1 $ buildWM (U.fromList [3,4,0,0,7,6,1,2,2,0,1,6,5])
 
 buildWM :: U.Vector Int -> WaveletMatrix
-buildWM bits = WaveletMatrix (B.fromList (butterfly 64 bits))
+buildWM bits = WaveletMatrix (B.fromList (Prelude.map (_CSPoppy #) (butterfly 64 bits)))
 
-butterfly :: Int -> U.Vector Int -> [CSPoppy]
+butterfly :: Int -> U.Vector Int -> [U.Vector Bit]
 butterfly 0 v = []
-butterfly i v = sucv : butterfly (i-1) (v0 U.++ v1) 
-    where v0 = U.filter (not . flip testBit (i-1)) v
-          v1 = U.filter (flip testBit (i-1)) v
-          sucv = _CSPoppy # U.map (Bit . flip testBit (i-1)) v
+butterfly l v = bv : butterfly (l-1) (v0 U.++ v1) 
+    where (v1,v0) = U.partition (test False True . testB (64-l)) v
+          bv = U.map (testB (64-l)) v
 
+testB :: Int -> Int -> Bit
+testB l = Bit . flip testBit l
+
+test :: a -> a -> Bit -> a
+test f t b | b == Bit False = f
+           | otherwise = t
+
+offset :: P.SucBV bv => Bit -> bv -> Int
+offset b bv = test 0 (P.rank (Bit False) (P.size bv) bv) b
+
+wmAccess :: Int -> WaveletMatrix -> Int
+wmAccess i (WaveletMatrix bm) = acc 0 i
+    where acc 64 _ = 0
+          acc l n = g + (acc (l+1) n')
+            where bs = bm B.! l
+                  b = P.access n bs
+                  n' = offset b bs + P.rank b n bs
+                  g = if getBit b then setBit 0 l else 0 :: Int
+
+wmRank :: Int -> Int -> WaveletMatrix -> Int
+wmRank c i (WaveletMatrix bm) = rnk 0 0 i
+    where rnk 64 n m = m - n
+          rnk l n m = rnk (l+1) n' m'
+            where bs = bm B.! l
+                  b = testB l c
+                  z = offset b bs
+                  m' = z + P.rank b m bs
+                  n' = z + P.rank b n bs
+
+wmSelect :: Int -> Int -> WaveletMatrix -> Int
+wmSelect c j (WaveletMatrix bm) = sel 0 0 j
+    where sel 64 n m = n + m
+          sel l n m = select b (m' - z) bs
+            where bs = bm B.! l
+                  b = testB l c
+                  z = offset b bs
+                  n' = z + P.rank b n bs
+                  m' = sel (l+1) n' m

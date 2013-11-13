@@ -14,6 +14,7 @@
 
 module Data.Vector.Succinct.Poppy (
   Poppy, CSPoppy, _Poppy, _CSPoppy
+  , SucBV(..)
   ) where
 
 import Data.Bits
@@ -38,6 +39,7 @@ import Data.Maybe
 
 class SucBV sbv where
     isobv :: Iso' sbv (Array Bit)
+    access :: Int -> sbv -> Bit
     rank :: Bit -> Int -> sbv -> Int
     select :: Bit -> Int -> sbv -> Int
     size :: sbv -> Int
@@ -64,6 +66,7 @@ data Poppy = Poppy {-# UNPACK #-} !Int !(Array Bit)
 
 instance SucBV Poppy where
     isobv = _Poppy
+    access i (Poppy _ v _ _) = v U.! i
     rank (Bit True) n (Poppy len (V_Bit _ ws) ubs lbs) = c''' + c'' + c' + c
       where (wi,wo) = n `divMod` 64
             (ui,uo) = wi `divMod` ubsize
@@ -177,6 +180,7 @@ mkbbvector w = U.fromList [l0,l1,l2,l3]
 
 instance SucBV CSPoppy where
     isobv = _CSPoppy
+    access i (CSPoppy _ v _ _ _ _) = v U.! i
     size (CSPoppy len _ _ _ _ _) = len
     rank (Bit True) n (CSPoppy len (V_Bit _ ws) ubs lbs _ _) = c''' + c'' + c' + c
       where (wi,wo) = n `divMod` 64
