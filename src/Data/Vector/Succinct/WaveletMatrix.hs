@@ -25,23 +25,28 @@ newtype WaveletMatrix = WaveletMatrix (B.Vector CSPoppy) deriving Show
 -- 3
 
 buildWM :: U.Vector Int -> WaveletMatrix
-buildWM bits = WaveletMatrix (B.fromList (Prelude.map (_CSPoppy #) (butterfly 64 bits)))
+buildWM bits = WaveletMatrix (B.fromList (Prelude.map (_CSPoppy #) (wave 64 bits)))
+{-# INLINE buildWM #-}
 
-butterfly :: Int -> U.Vector Int -> [U.Vector Bit]
-butterfly 0 v = []
-butterfly l v = bv : butterfly (l-1) (v0 U.++ v1) 
+wave :: Int -> U.Vector Int -> [U.Vector Bit]
+wave 0 v = []
+wave l v = bv : wave (l-1) (v0 U.++ v1) 
     where (v1,v0) = U.partition (test False True . testB (64-l)) v
           bv = U.map (testB (64-l)) v
+{-# INLINE wave #-}
 
 testB :: Int -> Int -> Bit
 testB l = Bit . flip testBit l
+{-# INLINE testB #-}
 
 test :: a -> a -> Bit -> a
 test f t b | b == Bit False = f
            | otherwise = t
+{-# INLINE test #-}
 
 offset :: P.SucBV bv => Bit -> bv -> Int
 offset b bv = test 0 (P.rank (Bit False) (P.size bv) bv) b
+{-# INLINE offset #-}
 
 wmAccess :: Int -> WaveletMatrix -> Int
 wmAccess i (WaveletMatrix bm) = acc 0 i
@@ -51,6 +56,8 @@ wmAccess i (WaveletMatrix bm) = acc 0 i
                   b = P.access n bs
                   n' = offset b bs + P.rank b n bs
                   g = if getBit b then setBit 0 l else 0 :: Int
+          {-# INLINE acc #-}
+{-# INLINE wmAccess #-}
 
 wmRank :: Int -> Int -> WaveletMatrix -> Int
 wmRank c i (WaveletMatrix bm) = rnk 0 0 i
@@ -61,6 +68,8 @@ wmRank c i (WaveletMatrix bm) = rnk 0 0 i
                   z = offset b bs
                   m' = z + P.rank b m bs
                   n' = z + P.rank b n bs
+          {-# INLINE rnk #-}
+{-# INLINE wmRank #-}
 
 wmSelect :: Int -> Int -> WaveletMatrix -> Int
 wmSelect c j (WaveletMatrix bm) = sel 0 0 j
@@ -71,3 +80,6 @@ wmSelect c j (WaveletMatrix bm) = sel 0 0 j
                   z = offset b bs
                   n' = z + P.rank b n bs
                   m' = sel (l+1) n' m
+          {-# INLINE sel #-}
+{-# INLINE wmSelect #-}
+

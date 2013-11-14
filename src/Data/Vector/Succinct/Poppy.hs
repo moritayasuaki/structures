@@ -44,7 +44,6 @@ class SucBV sbv where
     select :: Bit -> Int -> sbv -> Int
     size :: sbv -> Int
 
-
 -- |
 -- >>> let t = Bit True
 -- >>> let f = Bit False
@@ -58,11 +57,31 @@ class SucBV sbv where
 -- 1778
 -- >>> select t 1778 csp
 -- 8886
+-- >>> let v = U.fromList (take 30000 (cycle [t,f,f,f,f]))
+-- >>> rank t 8886 v 
+-- 1778
+-- >>> select t 1778 v
+-- 8886
+
+instance SucBV (U.Vector Bit) where 
+    isobv = iso id id
+    size = U.length
+    access i v = v U.! i
+    rank b n v = U.sum $ U.map (\a -> if b == a then 1 else 0) (U.take n v)
+    select b 0 v = 0
+    select b n v = 1 + (U.findIndices (== b) v) U.! (n-1)
+    {-# INLINE isobv #-}
+    {-# INLINE access #-}
+    {-# INLINE rank #-}
+    {-# INLINE select #-}
+    {-# INLINE size #-}
+
 
 data Poppy = Poppy {-# UNPACK #-} !Int !(Array Bit) 
                 !(U.Vector Word64) 
                 !(U.Vector Word64)
                 deriving (Eq,Ord,Show,Read)
+
 
 instance SucBV Poppy where
     isobv = _Poppy
@@ -74,13 +93,19 @@ instance SucBV Poppy where
             (li,lo) = wi `divMod` lbsize
             (bi,bo) = wi `divMod` bbsize
     rank _ n p = n - rank (Bit True) n p
-    select b n poppy@(Poppy len _ _ _) = bsearch (\i -> (n-1) < rank b i poppy) 0 (len-1)
+    select b n poppy@(Poppy len _ _ _) = bsearch 0 len (\i -> (n-1) < rank b i poppy)
     size (Poppy len _ _ _) = len
+    {-# INLINE isobv #-}
+    {-# INLINE access #-}
+    {-# INLINE rank #-}
+    {-# INLINE select #-}
+    {-# INLINE size #-}
 
 
 _Poppy :: Iso' Poppy (Array Bit)
 _Poppy = iso (\(Poppy _ v _ _) -> v) f
   where f v@(V_Bit n ws) = let (ubs,lbs) = buildPoppy ws in Poppy n v ubs lbs
+{-# INLINE _Poppy #-}
 
 -- Poppy
 --
@@ -89,9 +114,17 @@ _Poppy = iso (\(Poppy _ v _ _) -> v) f
 -- lower block size = 2^11 bits    32 bits par 2^11 bits
 -- upper block size = 2^32 bits    64 bits par 2^32 bits
 --                                 3.12500149% additional space
+
+bbsize :: Int
 bbsize = 2^9 `div` 64  -- 8 words
+lbsize :: Int
 lbsize = 2^11 `div` 64 -- 4 base blocks
+ubsize :: Int
 ubsize = 2^32 `div` 64 -- 2000000 lower blocks
+{-# INLINE bbsize #-}
+{-# INLINE lbsize #-}
+{-# INLINE ubsize #-}
+
 
 buildPoppy :: U.Vector Word64 -> (U.Vector Word64,U.Vector Word64)
 buildPoppy vs = runST $ do 
@@ -128,18 +161,12 @@ buildPoppy vs = runST $ do
                     (bi,bo) = lo `divMod` bbsize
                 in (ui,uo,li,lo,bi,bo) :: (Int,Int,Int,Int,Int,Int)
         safeSlice i s vs = U.take s (U.drop i vs)
+{-# INLINE buildPoppy #-}
 
 divCeil :: Int -> Int -> Int
 divCeil n b = (n + b - 1) `div` b
+{-# INLINE divCeil #-}
 
--- |
--- >>> bsearch (\n->n^2 >= 16) 0 5
--- 4
-bsearch :: Integral n => (n -> Bool) -> n -> n -> n
-bsearch p l h | l == h = l
-             | p m = bsearch p l m
-             | otherwise = bsearch p (m+1) h
-             where m = l `div` 2 + h `div` 2
 
 -- CSPoppy supporting select0 and select1
 --
@@ -160,18 +187,13 @@ _CSPoppy = iso (\(CSPoppy _ v _ _ _ _) -> v) f
                   tstbl = buildCS (Bit True) p
                   fstbl = buildCS (Bit False) p
               in CSPoppy n v' ubs lbs tstbl fstbl
+{-# INLINE _CSPoppy #-}
 
 buildCS :: Bit -> Poppy -> U.Vector Word32
 buildCS b p@(Poppy n v' ubs lbs) = U.fromList $ map (fromIntegral . flip (select b) p) [1, 1+samplingWidth .. smax]
     where smax = rank b n p
           samplingWidth = 8192
-
-mkbbvector :: Word64 -> U.Vector Word64
-mkbbvector w = U.fromList [l0,l1,l2,l3]
-    where l0 = 0
-          l1 = (w `unsafeShiftR` 32) .&. (2^10-1)
-          l2 = l1 + ((w `unsafeShiftR` 42) .&. (2^10-1))
-          l3 = l2 + ((w `unsafeShiftR` 52) .&. (2^10-1))
+{-# INLINE buildCS #-}
 
 instance SucBV CSPoppy where
     isobv = _CSPoppy
@@ -200,44 +222,66 @@ instance SucBV CSPoppy where
             wi = pred $ wbSelect b j''' ws'
             j'''' = j''' - wbRank b wi ws'
             biti = wSelect b j'''' (ws' U.! wi)
+    {-# INLINE isobv #-}
+    {-# INLINE access #-}
+    {-# INLINE rank #-}
+    {-# INLINE select #-}
+    {-# INLINE size #-}
 
-lsearch :: Int -> Int -> (Int -> Bool) -> Int
+bsearch :: Integral a => a -> a -> (a -> Bool) -> a 
+bsearch l h p | l == h = l
+              | p m = bsearch l m p
+              | otherwise = bsearch (m+1) h p
+              where m = l `div` 2 + h `div` 2
+{-# INLINE bsearch #-}
+
+lsearch :: Integral a => a -> a -> (a -> Bool) -> a
 lsearch s e f | s == e = e
               | f s = s
               | otherwise = lsearch (s+1) e f
+{-# INLINE lsearch #-}
 
 ubRank :: Bit -> Int -> U.Vector Word64 -> Int
 ubRank (Bit True) i ubs = fromIntegral $ ubs U.! i
 ubRank (Bit False) i ubs = i*2^32 - ubRank (Bit True) i ubs
+{-# INLINE ubRank #-}
 
 lbRank :: Bit -> Int -> U.Vector Word64 -> Int
 lbRank (Bit True) i lbs = fromIntegral $ (lbs U.! i) .&. (2^32-1)
 lbRank (Bit False) i lbs = i*2^11 - lbRank (Bit True) i lbs
+{-# INLINE lbRank #-}
 
 bbRank :: Bit -> Int -> Word64 -> Int
 bbRank (Bit True) 0 bbs = 0
 bbRank (Bit True) i bbs = fromIntegral ((bbs `unsafeShiftR` ((i-1) * 10 + 32)) .&. (2^10 - 1)) + bbRank (Bit True) (i-1) bbs 
 bbRank (Bit False) i bbs = i * 2^9 - bbRank (Bit True) i bbs 
+{-# INLINE bbRank #-}
 
 wbRank :: Bit -> Int -> U.Vector Word64 -> Int
 wbRank (Bit True) i wbs = fromIntegral $ (U.scanl (\acc w -> acc + popCount w) 0 wbs) U.! i
 wbRank (Bit False) i wbs = i * 64 - wbRank (Bit True) i wbs
+{-# INLINE wbRank #-}
 
 wRank :: Bit -> Int -> Word64 -> Int
 wRank (Bit True) i w = popCount (w .&. (2^i - 1))
 wRank (Bit False) i w = i - wRank (Bit True) i w
+{-# INLINE wRank #-}
 
 ubSelect :: Bit -> Int -> U.Vector Word64 -> Int
 ubSelect b j ubs = lsearch 0 (U.length ubs) (\i -> j < ubRank b i ubs)
+{-# INLINE ubSelect #-}
 
 lbSelect :: Bit -> Int -> U.Vector Word64 -> Int
 lbSelect b j lbs = lsearch 0 (U.length lbs) (\i -> j < lbRank b i lbs)
+{-# INLINE lbSelect #-}
 
 bbSelect :: Bit -> Int -> Word64 -> Int
 bbSelect b j bbs = lsearch 0 (lbsize `div` bbsize) (\i -> j < bbRank b i bbs)
+{-# INLINE bbSelect #-}
 
 wbSelect :: Bit -> Int -> U.Vector Word64 -> Int
 wbSelect b j wbs = lsearch 0 bbsize (\i -> j < wbRank b i  wbs)
+{-# INLINE wbSelect #-}
 
 -- |
 -- >>> wSelect (Bit True) 64 0xFFFFFFFFFFFFFFFF
@@ -266,4 +310,6 @@ wSelect (Bit True) j w =
       (j0,p0) = if (j1 > v0) then (j1 - v0 , p1 + 1) else (j1,p1)
   in p0 + 1
 wSelect (Bit False) j w = wSelect (Bit True) j (complement w)
+{-# INLINE wSelect #-}
+
 
