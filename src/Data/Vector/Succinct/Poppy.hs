@@ -67,17 +67,12 @@ data Poppy = Poppy {-# UNPACK #-} !Int !(Array Bit)
 instance SucBV Poppy where
     isobv = _Poppy
     access i (Poppy _ v _ _) = v U.! i
-    rank (Bit True) n (Poppy len (V_Bit _ ws) ubs lbs) = c''' + c'' + c' + c
+    rank b@(Bit True) n (Poppy len (V_Bit _ ws) ubs lbs) = 
+        ubRank b ui ubs + lbRank b li lbs + bbRank b (lo `div` bbsize) (lbs U.! li) + wbRank b bo (U.unsafeDrop (bi*bbsize) ws) + wRank b wo (ws U.! wi)
       where (wi,wo) = n `divMod` 64
             (ui,uo) = wi `divMod` ubsize
             (li,lo) = wi `divMod` lbsize
             (bi,bo) = wi `divMod` bbsize
-            f 0 i = i .&. (2^32 - 1)
-            f n i = ((i `unsafeShiftR` ((n-1) * 10 + 32)) .&. (2^10-1)) + f (n-1) i
-            c = popCount ((ws U.! wi) .&. (2 ^ wo - 1))
-            c' = U.foldl' (\p w-> p + popCount w) 0 (U.unsafeSlice (bi*bbsize) bo ws)
-            c'' = fromIntegral (f (lo `div` bbsize) (lbs U.! li))
-            c''' = fromIntegral (ubs U.! ui)
     rank _ n p = n - rank (Bit True) n p
     select b n poppy@(Poppy len _ _ _) = bsearch (\i -> (n-1) < rank b i poppy) 0 (len-1)
     size (Poppy len _ _ _) = len
@@ -182,39 +177,93 @@ instance SucBV CSPoppy where
     isobv = _CSPoppy
     access i (CSPoppy _ v _ _ _ _) = v U.! i
     size (CSPoppy len _ _ _ _ _) = len
-    rank (Bit True) n (CSPoppy len (V_Bit _ ws) ubs lbs _ _) = c''' + c'' + c' + c
+    rank b@(Bit True) n (CSPoppy len (V_Bit _ ws) ubs lbs _ _) = 
+        ubRank b ui ubs + lbRank b li lbs + bbRank b (lo `div` bbsize) (lbs U.! li) + wbRank b bo (U.unsafeDrop (bi*bbsize) ws) + wRank b wo (ws U.! wi)
       where (wi,wo) = n `divMod` 64
             (ui,uo) = wi `divMod` ubsize
             (li,lo) = wi `divMod` lbsize
             (bi,bo) = wi `divMod` bbsize
-            f 0 i = i .&. (2^32 - 1)
-            f n i = ((i `unsafeShiftR` ((n-1) * 10 + 32)) .&. (2^10-1)) + f (n-1) i
-            c = popCount ((ws U.! wi) .&. (2 ^ wo - 1))
-            c' = U.foldl' (\p w-> p + popCount w) 0 (U.unsafeSlice (bi*bbsize) bo ws)
-            c'' = fromIntegral (f (lo `div` bbsize) (lbs U.! li))
-            c''' = fromIntegral (ubs U.! ui)
     rank _ n p = n - rank (Bit True) n p
-    select (Bit True) n (CSPoppy len (V_Bit _ ws) ubs lbs tstbl _) = eli * 2^11 + bi * 2^9 + wi * 2^6 + biti
-      where ui = maybe (U.length ubs - 1) pred (U.findIndex (\a -> (fromIntegral n) < a) ubs)
-            ur = ubs U.! ui
-            t = fromIntegral n - ur
-            tbli = ((n-1) `div` 8192)
-            sample = fromIntegral $ tstbl U.! tbli 
-            nli =  fromIntegral $ (sample `div` 64) `div` lbsize
+    select b j (CSPoppy len (V_Bit _ ws) ubs lbs tstbl fstbl) = li * 2^11 + bi * 2^9 + wi * 2^6 + biti
+      where tbl = if getBit b then tstbl else fstbl
+            ui = pred $ ubSelect b j ubs
+            j' = j - ubRank b ui ubs
+            tbli = ((j-1) `div` 8192)
+            sample = fromIntegral $ tbl U.! tbli 
+            nli = fromIntegral $ (sample `div` 64) `div` lbsize
             lbs' = U.unsafeDrop nli lbs
-            eli = nli + maybe (U.length lbs' - 1) pred (U.findIndex (\a -> t < a .&. (2^32-1)) lbs')
-            lr = lbs U.! eli
-            t' = t - (lr .&. (2^32-1))
-            bs = mkbbvector lr
-            bi = maybe (U.length bs - 1) pred (U.findIndex (\a -> t' < a) bs)
-            br = bs U.! bi
-            ws' = U.scanl (\l a -> l + fromIntegral (popCount a)) 0 $ U.drop (eli * 2^5 + bi * 2^3) ws
-            t'' = t' - br
-            wi = maybe (U.length ws' - 1) pred (U.findIndex (\a -> t'' < a) ws')
-            wr = ws' U.! wi
-            t''' = fromIntegral (t'' - wr)
-            biti = select64naive t''' (ws U.! (eli * 2^5 + bi * 2^3 + wi))
+            li = pred $ nli + lbSelect b j' lbs' 
+            j'' = j' - lbRank b li lbs
+            bi = pred $ bbSelect b j'' (lbs U.! li)
+            j''' = j'' - bbRank b bi (lbs U.! li)
+            ws' = U.unsafeDrop (li * 2^5 + bi * 2^3) ws
+            wi = pred $ wbSelect b j''' ws'
+            j'''' = j''' - wbRank b wi ws'
+            biti = wSelect b j'''' (ws' U.! wi)
 
-select64naive :: Int -> Word64 -> Int
-select64naive r x = maybe 64 id $ findIndex (r <=) [popCount (x .&. (2^i-1)) | i <- [0..63]]
+lsearch :: Int -> Int -> (Int -> Bool) -> Int
+lsearch s e f | s == e = e
+              | f s = s
+              | otherwise = lsearch (s+1) e f
+
+ubRank :: Bit -> Int -> U.Vector Word64 -> Int
+ubRank (Bit True) i ubs = fromIntegral $ ubs U.! i
+ubRank (Bit False) i ubs = i*2^32 - ubRank (Bit True) i ubs
+
+lbRank :: Bit -> Int -> U.Vector Word64 -> Int
+lbRank (Bit True) i lbs = fromIntegral $ (lbs U.! i) .&. (2^32-1)
+lbRank (Bit False) i lbs = i*2^11 - lbRank (Bit True) i lbs
+
+bbRank :: Bit -> Int -> Word64 -> Int
+bbRank (Bit True) 0 bbs = 0
+bbRank (Bit True) i bbs = fromIntegral ((bbs `unsafeShiftR` ((i-1) * 10 + 32)) .&. (2^10 - 1)) + bbRank (Bit True) (i-1) bbs 
+bbRank (Bit False) i bbs = i * 2^9 - bbRank (Bit True) i bbs 
+
+wbRank :: Bit -> Int -> U.Vector Word64 -> Int
+wbRank (Bit True) i wbs = fromIntegral $ (U.scanl (\acc w -> acc + popCount w) 0 wbs) U.! i
+wbRank (Bit False) i wbs = i * 64 - wbRank (Bit True) i wbs
+
+wRank :: Bit -> Int -> Word64 -> Int
+wRank (Bit True) i w = popCount (w .&. (2^i - 1))
+wRank (Bit False) i w = i - wRank (Bit True) i w
+
+ubSelect :: Bit -> Int -> U.Vector Word64 -> Int
+ubSelect b j ubs = lsearch 0 (U.length ubs) (\i -> j < ubRank b i ubs)
+
+lbSelect :: Bit -> Int -> U.Vector Word64 -> Int
+lbSelect b j lbs = lsearch 0 (U.length lbs) (\i -> j < lbRank b i lbs)
+
+bbSelect :: Bit -> Int -> Word64 -> Int
+bbSelect b j bbs = lsearch 0 (lbsize `div` bbsize) (\i -> j < bbRank b i bbs)
+
+wbSelect :: Bit -> Int -> U.Vector Word64 -> Int
+wbSelect b j wbs = lsearch 0 bbsize (\i -> j < wbRank b i  wbs)
+
+-- |
+-- >>> wSelect (Bit True) 64 0xFFFFFFFFFFFFFFFF
+-- 64
+-- >>> wSelect (Bit True) 8 0x0101010101010101
+-- 57
+wSelect :: Bit -> Int -> Word64 -> Int
+wSelect (Bit True) 0 w = 0
+wSelect (Bit True) j w = 
+  let x1 = ((w .&. 0xaaaaaaaaaaaaaaaa) `unsafeShiftR` 1) + (w .&. 0x5555555555555555)
+      x2 = ((x1 .&. 0xcccccccccccccccc) `unsafeShiftR` 2) + (x1 .&. 0x3333333333333333)
+      x3 = ((x2 .&. 0xf0f0f0f0f0f0f0f0) `unsafeShiftR` 4) + (x2 .&. 0x0f0f0f0f0f0f0f0f)
+      x4 = ((x3 .&. 0xff00ff00ff00ff00) `unsafeShiftR` 8) + (x3 .&. 0x00ff00ff00ff00ff)
+      x5 = ((x4 .&. 0xffff0000ffff0000) `unsafeShiftR` 16) + (x4 .&. 0x0000ffff0000ffff)
+      v5 = fromIntegral $ x5 .&. 0xffffffff
+      (j5,p5) = if (j > v5) then (j - v5 , 32) else (j,0)
+      v4 = fromIntegral $ (x4 `unsafeShiftR` p5) .&. 0xffff
+      (j4,p4) = if (j5 > v4) then (j5 - v4 , p5 + 16) else (j5,p5)
+      v3 = fromIntegral $ (x3 `unsafeShiftR` p4) .&. 0xff
+      (j3,p3) = if (j4 > v3) then (j4 - v3 , p4 + 8) else (j4,p4)
+      v2 = fromIntegral $ (x2 `unsafeShiftR` p3) .&. 0xf
+      (j2,p2) = if (j3 > v2) then (j3 - v2 , p3 + 4) else (j3,p3)
+      v1 = fromIntegral $ (x1 `unsafeShiftR` p2) .&. 0x3
+      (j1,p1) = if (j2 > v1) then (j2 - v1 , p2 + 2) else (j2,p2)
+      v0 = fromIntegral $ (w `unsafeShiftR` p1) .&. 0x01
+      (j0,p0) = if (j1 > v0) then (j1 - v0 , p1 + 1) else (j1,p1)
+  in p0 + 1
+wSelect (Bit False) j w = wSelect (Bit True) j (complement w)
 

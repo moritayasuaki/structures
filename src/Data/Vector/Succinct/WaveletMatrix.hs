@@ -22,6 +22,7 @@ newtype WaveletMatrix = WaveletMatrix (B.Vector CSPoppy) deriving Show
 
 -- |
 -- >>> wmSelect 0 1 $ buildWM (U.fromList [3,4,0,0,7,6,1,2,2,0,1,6,5])
+-- 3
 
 buildWM :: U.Vector Int -> WaveletMatrix
 buildWM bits = WaveletMatrix (B.fromList (Prelude.map (_CSPoppy #) (butterfly 64 bits)))
